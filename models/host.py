@@ -8,4 +8,5 @@ class Host:
         self.vulnerabilities: List[Vulnerability] = []
         self.credentials: List[dict] = []
         self.directories: List[dict] = []
+        self.os_detection: str = "No detectado"
         self.risk_level: RiskLevel = RiskLevel.LOW

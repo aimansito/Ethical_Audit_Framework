@@ -13,12 +13,31 @@ class NmapScanner:
 
     def full_scan(self):
         nm = nmap.PortScanner()
-        rprint(f"   [cyan]📡 Nmap Top 1000 + Servicios...[/cyan]")
+        rprint(f"   [cyan]📡 Nmap Top 1000 + Servicios + OS Detection...[/cyan]")
 
-        nm.scan(self.target_ip, '1-1000', arguments='-sV -sC --top-ports 1000')
+        nm.scan(self.target_ip, '1-1000', arguments='-sV -sC -O --top-ports 1000')
 
         host = Host(ip=self.target_ip)
+
         if self.target_ip in nm.all_hosts():
+            # OS Detection
+            try:
+                os_matches = nm[self.target_ip].get('osmatch', [])
+                if os_matches:
+                    best = os_matches[0]
+                    host.os_detection = f"{best.get('name', 'Unknown')} ({best.get('accuracy', '?')}%)"
+                    rprint(f"   [green]🖥️  OS Detectado: {host.os_detection}[/green]")
+                else:
+                    # Intentar osclass
+                    os_class = nm[self.target_ip].get('osclass', [])
+                    if os_class:
+                        oc = os_class[0]
+                        host.os_detection = f"{oc.get('osfamily', '')} {oc.get('osgen', '')}"
+                        rprint(f"   [green]🖥️  OS Detectado: {host.os_detection}[/green]")
+            except Exception:
+                pass
+
+            # Puertos
             for proto in nm[self.target_ip].all_protocols():
                 ports = nm[self.target_ip][proto].keys()
                 for port in ports:
@@ -33,7 +52,7 @@ class NmapScanner:
 
         rprint(f"   [green]✅ {len(host.ports_open)} servicios detectados[/green]")
 
-        # Mostrar detalle de cada puerto
+        # Tabla detallada
         if host.ports_open:
             rprint(f"\n   [bold]{'PORT':<12} {'STATE':<10} {'SERVICE':<15} {'VERSION'}[/bold]")
             rprint(f"   {'─'*60}")
@@ -64,7 +83,6 @@ class NmapScanner:
 
             for line in result.stdout.split('\n'):
                 if 'Nmap scan report for' in line:
-                    # Extraer IP
                     parts = line.split()
                     ip = parts[-1].strip('()')
                     if ip.startswith('192.168.56.') and not ip.endswith('.1') and not ip.endswith('.0'):

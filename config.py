@@ -7,6 +7,7 @@ class Config:
 
     # Target por defecto
     DEFAULT_TARGET = '192.168.56.102'
+    DEFAULT_NETWORK = '192.168.56.0/24'
 
     # DVWA
     DVWA_LOGIN_URL = '/dvwa/login.php'
@@ -22,3 +23,15 @@ class Config:
 
     # Wordlist para brute-force
     WORDLIST_PATH = '/usr/share/wordlists/rockyou.txt'
+
+    # Gobuster
+    GOBUSTER_WORDLIST = '/usr/share/wordlists/dirb/common.txt'
+
+    # Hashes comunes para crackeo rápido
+    COMMON_PASSWORDS = [
+        'password', 'admin', 'admin123', '123456', 'root', 'toor',
+        'letmein', 'welcome', 'monkey', 'dragon', 'master', 'qwerty',
+        'login', 'abc123', 'starwars', 'trustno1', 'iloveyou', 'shadow',
+        'superman', 'batman', '1234567890', 'password1', 'hello',
+        'charlie', 'donald', 'football', 'michael', 'passwd'
+    ]

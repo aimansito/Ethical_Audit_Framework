@@ -2,6 +2,7 @@ import nmap
 from pathlib import Path
 from config import Config
 from models.host import Host
+from rich import print as rprint
 
 
 class NmapScanner:
@@ -12,7 +13,7 @@ class NmapScanner:
 
     def full_scan(self):
         nm = nmap.PortScanner()
-        print("   📡 Nmap Top 1000 + Servicios...")
+        rprint(f"   [cyan]📡 Nmap Top 1000 + Servicios...[/cyan]")
 
         nm.scan(self.target_ip, '1-1000', arguments='-sV -sC --top-ports 1000')
 
@@ -25,8 +26,56 @@ class NmapScanner:
                     host.ports_open[int(port)] = {
                         'state': service['state'],
                         'service': service.get('name', 'unknown'),
-                        'version': service.get('version', '')
+                        'version': service.get('version', ''),
+                        'product': service.get('product', ''),
+                        'extra': service.get('extrainfo', '')
                     }
 
-        print(f"   ✅ {len(host.ports_open)} servicios detectados")
+        rprint(f"   [green]✅ {len(host.ports_open)} servicios detectados[/green]")
+
+        # Mostrar detalle de cada puerto
+        if host.ports_open:
+            rprint(f"\n   [bold]{'PORT':<12} {'STATE':<10} {'SERVICE':<15} {'VERSION'}[/bold]")
+            rprint(f"   {'─'*60}")
+            for port, info in sorted(host.ports_open.items()):
+                state = info['state']
+                svc = info['service']
+                ver = f"{info.get('product','')} {info['version']}".strip()
+                color = 'green' if state == 'open' else 'yellow'
+                rprint(f"   [{color}]{port}/tcp{'':<6} {state:<10} {svc:<15} {ver}[/{color}]")
+
         return host
+
+    @staticmethod
+    def discover_network(network='192.168.56.0/24'):
+        """Auto-descubrir hosts en la red"""
+        import subprocess
+        hosts = []
+
+        rprint(f"\n[bold cyan]{'='*60}[/bold cyan]")
+        rprint(f"[bold cyan]🔍 NETWORK DISCOVERY: {network}[/bold cyan]")
+        rprint(f"[bold cyan]{'='*60}[/bold cyan]\n")
+
+        try:
+            result = subprocess.run(
+                ['nmap', '-sn', network],
+                capture_output=True, text=True, timeout=30
+            )
+
+            for line in result.stdout.split('\n'):
+                if 'Nmap scan report for' in line:
+                    # Extraer IP
+                    parts = line.split()
+                    ip = parts[-1].strip('()')
+                    if ip.startswith('192.168.56.') and not ip.endswith('.1') and not ip.endswith('.0'):
+                        hosts.append(ip)
+
+            rprint(f"[green]   ✅ {len(hosts)} host(s) encontrados en {network}[/green]")
+            for h in hosts:
+                rprint(f"   [cyan]📌 {h}[/cyan]")
+
+        except Exception as e:
+            rprint(f"[red]   ❌ Error en discovery: {e}[/red]")
+            hosts = [Config.DEFAULT_TARGET]
+
+        return hosts
